@@ -1,4 +1,4 @@
-import argparse, os, pickle, sys
+import argparse, os, pickle, sys, time
 import torch
 from omegaconf import OmegaConf
 sys.path.insert(0, os.environ.get("NCM_ROOT", os.getcwd()))
@@ -23,8 +23,12 @@ ap.add_argument("--freq", type=float, default=None)
 ap.add_argument("--mu", type=float, default=None)
 ap.add_argument("--adj", default=None)
 ap.add_argument("--l0", default="", help="unigram (default), active, uniform, or smooth:<eps> (mix eps of uniform into the unigram)")
+ap.add_argument("--passes", default="", help="within-level refinement, e.g. '4:2,5:2' (level:passes); empty = standard NCM")
+ap.add_argument("--policy", default="confidence", help="refinement commit policy: confidence, random or l2r")
+ap.add_argument("--schedule", default="linear", help="refinement commit schedule: linear or cosine")
 ap.add_argument("--out", required=True)
 a = ap.parse_args()
+PASSES = {int(k): int(v) for k, v in (kv.split(":") for kv in a.passes.split(","))} if a.passes else None
 
 CFG = OmegaConf.load(a.config)
 G = CFG.generation
@@ -135,11 +139,25 @@ def dec(ids):
 
 
 RAW = []
+GEN_SECONDS = [0.0]
+if PASSES:
+    from models import partial_refinement as pr
+
+    assert cfg <= 0, "refinement does not support CFG yet"
+    RNG = torch.Generator(device="cuda").manual_seed(1234 + a.shard)
 
 
 def run(x, l0=None):
     with torch.no_grad():
-        g = net.generate(l0, x, temperature=temp, top_k=top_k, top_p=top_p, cfg_scale=cfg, cfg_null_eos=EOS)
+        torch.cuda.synchronize()
+        t0 = time.time()
+        if PASSES:
+            g = pr.generate_refined(net, l0, x, PASSES, policy=a.policy, schedule=a.schedule,
+                                    temperature=temp, top_k=top_k, top_p=top_p, rng=RNG)
+        else:
+            g = net.generate(l0, x, temperature=temp, top_k=top_k, top_p=top_p, cfg_scale=cfg, cfg_null_eos=EOS)
+        torch.cuda.synchronize()
+        GEN_SECONDS[0] += time.time() - t0
         _, zl = tk.vqvae.vq.idx_to_zhats(g, return_zlevels=True)
         ids = pick_tokens(tk.vqvae.decoder(zl[-1])).tolist()
         RAW.extend(ids)
@@ -159,7 +177,8 @@ if UNCOND:
         print(f"  shard{a.shard} seed {seed}: {n} samples", flush=True)
     idxs = list(range(len(hyps)))
     toks = [tk.pre_tokenizer.encode(h) for h in hyps]
-    out = {"idxs": idxs, "hyps": hyps, "refs": [""] * len(hyps), "seeds": sample_seed, "toks": toks, "raw_ids": RAW}
+    out = {"idxs": idxs, "hyps": hyps, "refs": [""] * len(hyps), "seeds": sample_seed, "toks": toks, "raw_ids": RAW,
+           "gen_seconds": GEN_SECONDS[0], "passes": PASSES, "policy": a.policy, "schedule": a.schedule}
 else:
     for s in range(0, len(idxs), bs):
         batch = idxs[s:s + bs]
