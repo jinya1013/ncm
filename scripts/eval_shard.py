@@ -1,6 +1,7 @@
 import argparse, os, pickle, sys, time
 import torch
 from omegaconf import OmegaConf
+
 sys.path.insert(0, os.environ.get("NCM_ROOT", os.getcwd()))
 from models.next_concept import NextConceptTransformer
 from tokenization.vqvae_tokenizer import VQVAETokenizer
@@ -22,19 +23,39 @@ ap.add_argument("--cfg", type=float, default=None)
 ap.add_argument("--freq", type=float, default=None)
 ap.add_argument("--mu", type=float, default=None)
 ap.add_argument("--adj", default=None)
-ap.add_argument("--l0", default="", help="unigram (default), active, uniform, or smooth:<eps> (mix eps of uniform into the unigram)")
-ap.add_argument("--passes", default="", help="within-level refinement, e.g. '4:2,5:2' (level:passes); empty = standard NCM")
-ap.add_argument("--policy", default="confidence", help="refinement commit policy: confidence, random or l2r")
-ap.add_argument("--schedule", default="linear", help="refinement commit schedule: linear or cosine")
+ap.add_argument(
+    "--l0",
+    default="",
+    help="unigram (default), active, uniform, or smooth:<eps> (mix eps of uniform into the unigram)",
+)
+ap.add_argument(
+    "--passes",
+    default="",
+    help="within-level refinement, e.g. '4:2,5:2' (level:passes); empty = standard NCM",
+)
+ap.add_argument(
+    "--policy",
+    default="confidence",
+    help="refinement commit policy: confidence, random or l2r",
+)
+ap.add_argument(
+    "--schedule", default="linear", help="refinement commit schedule: linear or cosine"
+)
 ap.add_argument("--out", required=True)
 a = ap.parse_args()
-PASSES = {int(k): int(v) for k, v in (kv.split(":") for kv in a.passes.split(","))} if a.passes else None
+PASSES = (
+    {int(k): int(v) for k, v in (kv.split(":") for kv in a.passes.split(","))}
+    if a.passes
+    else None
+)
 
 CFG = OmegaConf.load(a.config)
 G = CFG.generation
 ck = a.checkpoint_dir or os.path.join("artifacts", CFG.task)
 dd = a.data_dir or os.path.join(os.environ.get("NCM_DATA_ROOT", "data"), CFG.task)
-pick = lambda cli, key, cast, default: cast(cli if cli is not None else G.get(key, default))
+pick = lambda cli, key, cast, default: cast(
+    cli if cli is not None else G.get(key, default)
+)
 temp = pick(a.temp, "temperature", float, 1.0)
 top_k = pick(a.top_k, "top_k", int, 1)
 top_p = pick(a.top_p, "top_p", float, 0.0)
@@ -47,13 +68,15 @@ n = a.n or int(CFG.eval.get("n_docs", 0))
 bs = a.bs or int(CFG.eval.batch_size)
 
 CFG.tokenizer.vqvae.checkpoint_path = os.path.join(ck, CFG.checkpoints.tokenizer)
-for key, name in (('vocab_file_path', 'bpe_vocab'), ('merges_file_path', 'bpe_merges')):
+for key, name in (("vocab_file_path", "bpe_vocab"), ("merges_file_path", "bpe_merges")):
     if CFG.checkpoints.get(name):
         CFG.tokenizer.pre_tokenizer[key] = os.path.join(ck, CFG.checkpoints[name])
 tk = VQVAETokenizer.from_config(CFG.tokenizer)
 tk.vqvae = tk.vqvae.cuda().eval()
 net = NextConceptTransformer(vqvae_local=tk.vqvae, config=CFG.model).cuda()
-sd = torch.load(os.path.join(ck, CFG.checkpoints.generator), map_location="cpu", weights_only=False)
+sd = torch.load(
+    os.path.join(ck, CFG.checkpoints.generator), map_location="cpu", weights_only=False
+)
 net.load_state_dict(sd["model"], strict=True)
 net.eval()
 P = int(CFG.model.prefix_len)
@@ -63,16 +86,22 @@ EOS, PAD = tk.pre_tokenizer.eos_token_id, tk.pre_tokenizer.pad_token_id
 def load_allowance(spec):
     if ":" in spec:
         path, ref = spec.split(":", 1)
-        obj = torch.load(os.path.join(ck, path), map_location="cuda", weights_only=False)
+        obj = torch.load(
+            os.path.join(ck, path), map_location="cuda", weights_only=False
+        )
         for k in ref.split("."):
             obj = obj[k]
         return obj.double()
     return torch.load(os.path.join(ck, spec), map_location="cuda").double()
 
 
-ALLOW = load_allowance(str(G.frequency_allowance)) if G.get("frequency_allowance") else None
+ALLOW = (
+    load_allowance(str(G.frequency_allowance)) if G.get("frequency_allowance") else None
+)
 L0_MODE = a.l0 or "unigram"
-L0_P = load_allowance(str(G.level0_unigram)).float() if G.get("level0_unigram") else None
+L0_P = (
+    load_allowance(str(G.level0_unigram)).float() if G.get("level0_unigram") else None
+)
 if L0_P is not None and L0_MODE == "active":
     L0_P = (L0_P > 0).float() / (L0_P > 0).sum()
 elif L0_P is not None and L0_MODE == "uniform":
@@ -84,7 +113,7 @@ UNCOND = not CFG.data or not CFG.data.get(split)
 ADJ = [float(v) for v in adj.split(",")] if adj else None
 
 if UNCOND:
-    seeds = [int(x) for x in CFG.eval.seeds][a.shard::a.nshards]
+    seeds = [int(x) for x in CFG.eval.seeds][a.shard :: a.nshards]
     n = a.n or int(CFG.eval.n_samples)
     items, refs, idxs, src_tok = [], [], [], None
 else:
@@ -92,7 +121,11 @@ else:
     refs = pickle.load(open(os.path.join(dd, CFG.data[f"{split}_refs"]), "rb"))[:n]
     assert len(items) == len(refs), f"{len(items)} inputs vs {len(refs)} references"
     idxs = list(range(a.shard, len(items), a.nshards))
-    src_tok = AutoTokenizer.from_pretrained(str(CFG.tokenizer.pre_tokenizer.model_id)) if isinstance(items[0], str) else None
+    src_tok = (
+        AutoTokenizer.from_pretrained(str(CFG.tokenizer.pre_tokenizer.model_id))
+        if isinstance(items[0], str)
+        else None
+    )
 
 
 def prefix(item):
@@ -120,11 +153,17 @@ def pick_tokens(logits):
             if mu > 0 and allow is not None:
                 step += mu * ((T - t) / T) * (allow - cnt).clamp_min(0.0)
         for j, h in enumerate(reversed(hist[-aw:])):
-            step.scatter_add_(1, h[:, None], torch.full((B, 1), -al * ad ** j, dtype=torch.float64, device=lg.device))
+            step.scatter_add_(
+                1,
+                h[:, None],
+                torch.full((B, 1), -al * ad**j, dtype=torch.float64, device=lg.device),
+            )
         p = step.argmax(-1)
         out[:, t] = p
         hist.append(p)
-        cnt.scatter_add_(1, p[:, None], torch.ones(B, 1, dtype=torch.float64, device=lg.device))
+        cnt.scatter_add_(
+            1, p[:, None], torch.ones(B, 1, dtype=torch.float64, device=lg.device)
+        )
     return out
 
 
@@ -134,8 +173,10 @@ CUT_AT_EOS = bool(G.get("cut_at_eos", True))
 def dec(ids):
     ids = list(ids)
     if CUT_AT_EOS and EOS in ids:
-        ids = ids[:ids.index(EOS)]
-    return tk.pre_tokenizer.decode([t for t in ids if t not in (EOS, PAD)], skip_special_tokens=True)
+        ids = ids[: ids.index(EOS)]
+    return tk.pre_tokenizer.decode(
+        [t for t in ids if t not in (EOS, PAD)], skip_special_tokens=True
+    )
 
 
 RAW = []
@@ -152,10 +193,28 @@ def run(x, l0=None):
         torch.cuda.synchronize()
         t0 = time.time()
         if PASSES:
-            g = pr.generate_refined(net, l0, x, PASSES, policy=a.policy, schedule=a.schedule,
-                                    temperature=temp, top_k=top_k, top_p=top_p, rng=RNG)
+            g = pr.generate_refined(
+                net,
+                l0,
+                x,
+                PASSES,
+                policy=a.policy,
+                schedule=a.schedule,
+                temperature=temp,
+                top_k=top_k,
+                top_p=top_p,
+                rng=RNG,
+            )
         else:
-            g = net.generate(l0, x, temperature=temp, top_k=top_k, top_p=top_p, cfg_scale=cfg, cfg_null_eos=EOS)
+            g = net.generate(
+                l0,
+                x,
+                temperature=temp,
+                top_k=top_k,
+                top_p=top_p,
+                cfg_scale=cfg,
+                cfg_null_eos=EOS,
+            )
         torch.cuda.synchronize()
         GEN_SECONDS[0] += time.time() - t0
         _, zl = tk.vqvae.vq.idx_to_zhats(g, return_zlevels=True)
@@ -171,21 +230,41 @@ if UNCOND:
         torch.manual_seed(seed)
         for s in range(0, n, bs):
             B = min(bs, n - s)
-            l0 = torch.multinomial(L0_P.cpu(), B * L0, replacement=True).view(B, L0).cuda() if L0_P is not None else None
+            l0 = (
+                torch.multinomial(L0_P.cpu(), B * L0, replacement=True)
+                .view(B, L0)
+                .cuda()
+                if L0_P is not None
+                else None
+            )
             hyps += run(torch.full((B, 1), EOS, device="cuda"), l0)
             sample_seed += [seed] * B
         print(f"  shard{a.shard} seed {seed}: {n} samples", flush=True)
     idxs = list(range(len(hyps)))
     toks = [tk.pre_tokenizer.encode(h) for h in hyps]
-    out = {"idxs": idxs, "hyps": hyps, "refs": [""] * len(hyps), "seeds": sample_seed, "toks": toks, "raw_ids": RAW,
-           "gen_seconds": GEN_SECONDS[0], "passes": PASSES, "policy": a.policy, "schedule": a.schedule}
+    out = {
+        "idxs": idxs,
+        "hyps": hyps,
+        "refs": [""] * len(hyps),
+        "seeds": sample_seed,
+        "toks": toks,
+        "raw_ids": RAW,
+        "gen_seconds": GEN_SECONDS[0],
+        "passes": PASSES,
+        "policy": a.policy,
+        "schedule": a.schedule,
+    }
 else:
     for s in range(0, len(idxs), bs):
-        batch = idxs[s:s + bs]
+        batch = idxs[s : s + bs]
         hyps += run(torch.tensor([prefix(items[i]) for i in batch], device="cuda"))
         if a.shard == 0 and (s // bs) % 10 == 0:
             print(f"  shard0 {s}/{len(idxs)}", flush=True)
-    out = {"idxs": idxs, "hyps": hyps, "refs": [r if isinstance(r, str) else dec(r) for r in (refs[i] for i in idxs)]}
+    out = {
+        "idxs": idxs,
+        "hyps": hyps,
+        "refs": [r if isinstance(r, str) else dec(r) for r in (refs[i] for i in idxs)],
+    }
 
 os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
 pickle.dump(out, open(a.out, "wb"))

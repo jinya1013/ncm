@@ -16,11 +16,14 @@ class SudokuTokenizer(Tokenizer):
         return cls()
 
     def encode(self, text):
-        text = text.replace('<BOS>', 'B')
-        chars = {'_': 0, '|': 10, 'B': 11, **{str(i): i for i in range(10)}}
+        text = text.replace("<BOS>", "B")
+        chars = {"_": 0, "|": 10, "B": 11, **{str(i): i for i in range(10)}}
         return [chars[c] for c in text if not c.isspace()]
 
     def decode(self, ids, skip_special_tokens=False):
-        chars = ['_'] + list('123456789') + ['|', '<BOS>']
-        return ''.join(chars[int(i)] for i in ids
-                       if not (skip_special_tokens and int(i) == self.bos_token_id))
+        chars = ["_"] + list("123456789") + ["|", "<BOS>"]
+        return "".join(
+            chars[int(i)]
+            for i in ids
+            if not (skip_special_tokens and int(i) == self.bos_token_id)
+        )

@@ -4,6 +4,7 @@ from torch.nn import functional as F
 
 try:
     from torch.nn.attention.flex_attention import flex_attention as _flex_attention
+
     HAS_FLEX_ATTENTION = True
 except ImportError:
     _flex_attention = None
@@ -52,29 +53,33 @@ class RMSNorm(nn.Module):
         rms = x_f.pow(2).mean(dim=-1, keepdim=True).add_(self.eps).rsqrt_()
         return (x_f * rms).to(orig_dtype) * self.weight
 
-class SelfAttention(nn.Module):
 
+class SelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # GQA: K/V use n_kv_heads <= n_head; the default reproduces full MHA.
-        self.n_kv_head = int(getattr(config, 'n_kv_heads', config.n_head))
-        assert config.n_head % self.n_kv_head == 0, "n_head must be divisible by n_kv_heads"
+        self.n_kv_head = int(getattr(config, "n_kv_heads", config.n_head))
+        assert config.n_head % self.n_kv_head == 0, (
+            "n_head must be divisible by n_kv_heads"
+        )
         _hd = config.n_embd // config.n_head
         self._kv_dim = self.n_kv_head * _hd
-        self.c_attn = nn.Linear(config.n_embd, config.n_embd + 2 * self._kv_dim, bias=config.bias)
+        self.c_attn = nn.Linear(
+            config.n_embd, config.n_embd + 2 * self._kv_dim, bias=config.bias
+        )
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        assert hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        assert hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
         self.caching, self.cached_k, self.cached_v = False, None, None
 
         # QK norm: RMSNorm over head_dim of Q and K, applied before RoPE as in Llama 3.
-        self.use_qk_norm = bool(getattr(config, 'use_qk_norm', False))
+        self.use_qk_norm = bool(getattr(config, "use_qk_norm", False))
         if self.use_qk_norm:
             head_dim = config.n_embd // config.n_head
             self.q_norm = RMSNorm(head_dim)
@@ -82,7 +87,6 @@ class SelfAttention(nn.Module):
 
     def kv_caching(self, enable: bool):
         self.caching, self.cached_k, self.cached_v = enable, None, None
-
 
     def forward(self, x, attn_mask=None, rope_cos_sin=None, block_mask=None):
         B, T, C = x.size()
@@ -103,9 +107,13 @@ class SelfAttention(nn.Module):
         # With KV caching the cache already holds rotated K, so rotate only [past_len, past_len+T).
         if rope_cos_sin is not None:
             cos_full, sin_full = rope_cos_sin
-            past_len = self.cached_k.size(2) if (self.caching and self.cached_k is not None) else 0
-            cos = cos_full[past_len:past_len + T]
-            sin = sin_full[past_len:past_len + T]
+            past_len = (
+                self.cached_k.size(2)
+                if (self.caching and self.cached_k is not None)
+                else 0
+            )
+            cos = cos_full[past_len : past_len + T]
+            sin = sin_full[past_len : past_len + T]
             q = apply_rotary_emb(q, cos, sin)
             k = apply_rotary_emb(k, cos, sin)
 
@@ -126,32 +134,39 @@ class SelfAttention(nn.Module):
         else:
             # Causal only for multiple tokens with no explicit mask; a cached single token sees all.
             use_causal = True if attn_mask is None and T > 1 else False
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0, is_causal=use_causal)
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=self.dropout if self.training else 0,
+                is_causal=use_causal,
+            )
         y = y.transpose(1, 2).contiguous().view(B, T, C)
 
         y = self.resid_dropout(self.c_proj(y))
         return y
 
-class MLP(nn.Module):
 
+class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.use_swiglu = bool(getattr(config, "use_swiglu", False))
-        self.use_geglu  = bool(getattr(config, "use_geglu", False))
-        self.use_relu2  = bool(getattr(config, "use_relu2", False))
-        self.gated_ffn  = self.use_swiglu or self.use_geglu
+        self.use_geglu = bool(getattr(config, "use_geglu", False))
+        self.use_relu2 = bool(getattr(config, "use_relu2", False))
+        self.gated_ffn = self.use_swiglu or self.use_geglu
         if self.gated_ffn:
             h = int(round(8 * config.n_embd / 3 / 8) * 8)
             self.w_gate = nn.Linear(config.n_embd, h, bias=config.bias)
-            self.w_up   = nn.Linear(config.n_embd, h, bias=config.bias)
+            self.w_up = nn.Linear(config.n_embd, h, bias=config.bias)
             self.c_proj = nn.Linear(h, config.n_embd, bias=config.bias)
-            self.act    = nn.SiLU() if self.use_swiglu else nn.GELU()
+            self.act = nn.SiLU() if self.use_swiglu else nn.GELU()
         else:
-            _ratio = float(getattr(config, 'mlp_ratio', 4.0))
+            _ratio = float(getattr(config, "mlp_ratio", 4.0))
             _h = int(round(_ratio * config.n_embd))
-            self.c_fc    = nn.Linear(config.n_embd, _h, bias=config.bias)
-            self.gelu    = nn.GELU()
-            self.c_proj  = nn.Linear(_h, config.n_embd, bias=config.bias)
+            self.c_fc = nn.Linear(config.n_embd, _h, bias=config.bias)
+            self.gelu = nn.GELU()
+            self.c_proj = nn.Linear(_h, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -164,8 +179,8 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
+
 class Block(nn.Module):
-    
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
@@ -197,12 +212,17 @@ class Block(nn.Module):
     def forward(self, x, attn_mask=None, rope_cos_sin=None, block_mask=None):
         if self.parallel_block:
             n = self.ln_1(x)
-            a = self.attn(n, attn_mask, rope_cos_sin=rope_cos_sin, block_mask=block_mask)
+            a = self.attn(
+                n, attn_mask, rope_cos_sin=rope_cos_sin, block_mask=block_mask
+            )
             m = self.mlp(n)
             if self.normformer:
-                a = self.ln_post_attn(a); m = self.ln_post_mlp(m)
+                a = self.ln_post_attn(a)
+                m = self.ln_post_mlp(m)
             return x + self._ls_scale(a, 1) + self._ls_scale(m, 2)
-        a = self.attn(self.ln_1(x), attn_mask, rope_cos_sin=rope_cos_sin, block_mask=block_mask)
+        a = self.attn(
+            self.ln_1(x), attn_mask, rope_cos_sin=rope_cos_sin, block_mask=block_mask
+        )
         if self.normformer:
             a = self.ln_post_attn(a)
         x = x + self._ls_scale(a, 1)
@@ -211,11 +231,12 @@ class Block(nn.Module):
             m = self.ln_post_mlp(m)
         x = x + self._ls_scale(m, 2)
         return x
-    
+
+
 class Transformer(nn.Module):
     def __init__(self):
         super().__init__()
-        
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -223,15 +244,15 @@ class Transformer(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-    
+
     def get_num_params(self, non_embedding=True):
         _ = non_embedding
         raise NotImplementedError("This method should be implemented in subclasses.")
-    
+
     def forward(self, x):
         _ = x
         raise NotImplementedError("This method should be implemented in subclasses.")
-    
+
     def generate(self, idx):
         _ = idx
         raise NotImplementedError("This method should be implemented in subclasses.")

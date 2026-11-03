@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import math
 
+
 class LayerNorm(nn.Module):
     def __init__(self, ndim, bias=False):
         super().__init__()
@@ -99,6 +100,7 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
+
 class Encoder(nn.Module):
     def __init__(
         self,
@@ -121,28 +123,48 @@ class Encoder(nn.Module):
     ):
         super().__init__()
 
-        assert compression_factor ==1 or compression_factor % 2 == 0, "Compression factor must be a power of 2"
+        assert compression_factor == 1 or compression_factor % 2 == 0, (
+            "Compression factor must be a power of 2"
+        )
         self.compression_factor = compression_factor
         self.wte = nn.Embedding(in_vocab_size, embed_dim)
         self.wpe = nn.Embedding(context_length, embed_dim) if use_pos_emb else None
         self.drop = nn.Dropout(dropout)
 
-        self.blocks = nn.ModuleList([
-            Block(config=type("Config", (object,), {
-                "n_embd": embed_dim, "n_head": n_layers, "bias": True,
-                "dropout": dropout, "use_qk_norm": use_qk_norm,
-                "attn_window": int(enc_attn_window)}))
-            for _ in range(int(enc_layers))
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                Block(
+                    config=type(
+                        "Config",
+                        (object,),
+                        {
+                            "n_embd": embed_dim,
+                            "n_head": n_layers,
+                            "bias": True,
+                            "dropout": dropout,
+                            "use_qk_norm": use_qk_norm,
+                            "attn_window": int(enc_attn_window),
+                        },
+                    )
+                )
+                for _ in range(int(enc_layers))
+            ]
+        )
         k = int(enc_conv_kernel)
         self.conv_blocks = nn.ModuleList()
         for _ in range(int(enc_conv_layers)):
             c1 = nn.Conv1d(embed_dim, embed_dim, k, padding=k // 2)
             c2 = nn.Conv1d(embed_dim, embed_dim, k, padding=k // 2)
-            nn.init.zeros_(c2.weight); nn.init.zeros_(c2.bias)
-            self.conv_blocks.append(nn.ModuleDict({
-                "ln": LayerNorm(embed_dim), "c1": c1, "c2": c2}))
-        self.ln_e = LayerNorm(embed_dim) if (int(enc_layers) > 0 or int(enc_conv_layers) > 0) else None
+            nn.init.zeros_(c2.weight)
+            nn.init.zeros_(c2.bias)
+            self.conv_blocks.append(
+                nn.ModuleDict({"ln": LayerNorm(embed_dim), "c1": c1, "c2": c2})
+            )
+        self.ln_e = (
+            LayerNorm(embed_dim)
+            if (int(enc_layers) > 0 or int(enc_conv_layers) > 0)
+            else None
+        )
 
         # Sequence compression: f>1 shortens the sequence before quantization; init is an average pool.
         self.down = None
@@ -214,7 +236,9 @@ class Decoder(nn.Module):
     ):
         super().__init__()
 
-        assert compression_factor ==1 or compression_factor % 2 == 0, "Compression factor must be a power of 2"
+        assert compression_factor == 1 or compression_factor % 2 == 0, (
+            "Compression factor must be a power of 2"
+        )
 
         self.wpe = nn.Embedding(int(context_length), embed_dim) if use_pos_emb else None
         self.drop = nn.Dropout(dropout)
@@ -222,9 +246,17 @@ class Decoder(nn.Module):
         self.compression_factor = compression_factor
 
         # n_layers is the head count here, not a depth.
-        _cfg = type("Config", (object,), {
-            "n_embd": embed_dim, "n_head": n_layers, "bias": True,
-            "dropout": dropout, "use_qk_norm": use_qk_norm})
+        _cfg = type(
+            "Config",
+            (object,),
+            {
+                "n_embd": embed_dim,
+                "n_head": n_layers,
+                "bias": True,
+                "dropout": dropout,
+                "use_qk_norm": use_qk_norm,
+            },
+        )
         self.middle_block = Block(config=_cfg)
         self.extra_blocks = nn.ModuleList(
             [Block(config=_cfg) for _ in range(max(0, int(dec_layers) - 1))]
@@ -236,7 +268,9 @@ class Decoder(nn.Module):
         self.up = None
         if int(compression_factor) > 1:
             f = int(compression_factor)
-            convT = nn.ConvTranspose1d(embed_dim, embed_dim, kernel_size=f, stride=f, bias=True)
+            convT = nn.ConvTranspose1d(
+                embed_dim, embed_dim, kernel_size=f, stride=f, bias=True
+            )
             with torch.no_grad():
                 convT.weight.zero_()
                 idx = torch.arange(embed_dim)
@@ -244,23 +278,32 @@ class Decoder(nn.Module):
                 convT.bias.zero_()
             self.up = convT
 
-
     def forward(self, z):
         if self.up is not None:
             z = self.up(z.transpose(1, 2)).transpose(1, 2)
         if self.wpe is not None:
-            z = z + self.wpe(torch.arange(z.shape[1], dtype=torch.long, device=z.device))
+            z = z + self.wpe(
+                torch.arange(z.shape[1], dtype=torch.long, device=z.device)
+            )
         x = self.middle_block(z)
         for blk in self.extra_blocks:
             x = blk(x)
         x = self.ln_f(x)
         x = self.output_layer(x)
         return x
-    
-    
-if __name__ == "__main__": 
-    encoder = Encoder(in_vocab_size=1000, context_length=512, compression_factor=1, embed_dim=256, n_layers=1)
-    decoder = Decoder(in_vocab_size=1000, embed_dim=256, compression_factor=1, n_layers=1)
+
+
+if __name__ == "__main__":
+    encoder = Encoder(
+        in_vocab_size=1000,
+        context_length=512,
+        compression_factor=1,
+        embed_dim=256,
+        n_layers=1,
+    )
+    decoder = Decoder(
+        in_vocab_size=1000, embed_dim=256, compression_factor=1, n_layers=1
+    )
 
     print(encoder)
     print(decoder)

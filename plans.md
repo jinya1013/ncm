@@ -125,14 +125,24 @@ def partial_contribution(vq, level_idx, code_ids, committed_mask):
 
 
 @torch.no_grad()
-def refine_level(model, vq, level_idx, previous_reconstruction,
-                 prefix_state, num_passes, policy, temperature):
+def refine_level(
+    model,
+    vq,
+    level_idx,
+    previous_reconstruction,
+    prefix_state,
+    num_passes,
+    policy,
+    temperature,
+):
     batch_size = previous_reconstruction.shape[0]
     level_size = vq.levels[level_idx]
-    committed = torch.zeros(batch_size, level_size, dtype=torch.bool,
-                            device=previous_reconstruction.device)
-    codes = torch.zeros(batch_size, level_size, dtype=torch.long,
-                        device=previous_reconstruction.device)
+    committed = torch.zeros(
+        batch_size, level_size, dtype=torch.bool, device=previous_reconstruction.device
+    )
+    codes = torch.zeros(
+        batch_size, level_size, dtype=torch.long, device=previous_reconstruction.device
+    )
 
     for step in range(num_passes):
         contribution = partial_contribution(vq, level_idx, codes, committed)
